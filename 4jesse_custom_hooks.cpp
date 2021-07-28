@@ -1,4 +1,3 @@
-
 function void
 J_DefaultRenderBuffer(Application_Links *app, View_ID view_id, Face_ID face_id,
                       Buffer_ID buffer, Text_Layout_ID text_layout_id,
@@ -28,6 +27,7 @@ J_DefaultRenderBuffer(Application_Links *app, View_ID view_id, Face_ID face_id,
             Comment_Highlight_Pair pairs[] = {
                 {string_u8_litexpr("NOTE"), finalize_color(defcolor_comment_pop, 0)},
                 {string_u8_litexpr("TODO"), finalize_color(defcolor_comment_pop, 1)},
+                {string_u8_litexpr("IMPORTANT"), finalize_color(defcolor_comment_pop, 2)},
             };
             draw_comment_highlights(app, buffer, text_layout_id, &token_array, pairs, ArrayCount(pairs));
         }
@@ -76,8 +76,12 @@ J_DefaultRenderBuffer(Application_Links *app, View_ID view_id, Face_ID face_id,
         String_Const_u8 name = string_u8_litexpr("*compilation*");
         Buffer_ID compilation_buffer = get_buffer_by_name(app, name, Access_Always);
         if (use_error_highlight){
-            draw_jump_highlights(app, buffer, text_layout_id, compilation_buffer,
-                                 fcolor_id(defcolor_highlight_junk));
+            draw_jump_highlights(app, buffer, text_layout_id, compilation_buffer,fcolor_id(defcolor_highlight_junk));
+        }
+        
+        // NOTE(rjf): Error annotations
+        {
+            J_RenderErrorAnnotations(app, buffer, face_id, text_layout_id, compilation_buffer);
         }
         
         // NOTE(allen): Search highlight
@@ -88,6 +92,17 @@ J_DefaultRenderBuffer(Application_Links *app, View_ID view_id, Face_ID face_id,
                                      fcolor_id(defcolor_highlight_white));
             }
         }
+    }
+    
+    //NOTE(Jesse): vertical scope annotations
+    {
+        u32 VerticalScopeFlags = (1|4|8|16);
+        vertical_scope_annotation_draw(app, view_id, buffer, text_layout_id, VerticalScopeFlags);
+    }
+    
+    //NOTE(Jesse): Underline Cursor Token Occourences
+    {
+        J_RenderTokenOccurances(app, buffer, view_id, text_layout_id, token_array, visible_range);
     }
     
     // NOTE(allen): Color parens
@@ -115,6 +130,9 @@ J_DefaultRenderBuffer(Application_Links *app, View_ID view_id, Face_ID face_id,
             draw_whitespace_highlight(app, text_layout_id, &token_array, cursor_roundness);
         }
     }
+    Mouse_State mouse = get_mouse_state(app);
+    
+    Rect_f32 view_rect = view_get_screen_rect(app, view_id);
     
     // NOTE(allen): Cursor
     switch (fcoder_mode){
@@ -297,11 +315,16 @@ BUFFER_HOOK_SIG(J_DefaultBeginBuffer){
     
     String_ID file_map_id = vars_save_string_lit("keys_file");
     String_ID code_map_id = vars_save_string_lit("keys_code");
+    String_ID edit_map_id = vars_save_string_lit("keys_edit");
     
-    Command_Map_ID map_id = (treat_as_code)?(code_map_id):(file_map_id);
+    Command_Map_ID map_id = file_map_id;
     
-    if(global_edit_mode) {
-        map_id = vars_save_string_lit("keys_edit");
+    if(treat_as_code) {
+        if(global_edit_mode) {
+            map_id = edit_map_id;
+        } else {
+            map_id = code_map_id;
+        }
     }
     
     Managed_Scope scope = buffer_get_managed_scope(app, buffer_id);
@@ -335,7 +358,6 @@ BUFFER_HOOK_SIG(J_DefaultBeginBuffer){
         b32 *wrap_lines_ptr = scope_attachment(app, scope, buffer_wrap_lines, b32);
         *wrap_lines_ptr = wrap_lines;
     }
-    
     if (use_lexer){
         buffer_set_layout(app, buffer_id, layout_virt_indent_index_generic);
     }
@@ -358,32 +380,20 @@ CUSTOM_DOC("Default command for responding to a startup event")
 {
     ProfileScope(app, "J_default startup");
     User_Input input = get_current_input(app);
-    
-    if (!match_core_code(&input, CoreCode_Startup)){
-        return;
+    if (match_core_code(&input, CoreCode_Startup)){
+        String_Const_u8_Array file_names = input.event.core.file_names;
+        load_themes_default_folder(app);
+        default_4coder_initialize(app, file_names);
+        default_4coder_side_by_side_panels(app, file_names);
+        b32 auto_load = def_get_config_b32(vars_save_string_lit("automatically_load_project"));
+        if (auto_load){
+            load_project(app);
+        }
     }
-    
-    String_Const_u8_Array file_names = input.event.core.file_names;
-    default_4coder_initialize(app, file_names);
     
     {
-        Buffer_ID comp_buffer = create_buffer(app, string_u8_litexpr("*compilation*"),
-                                              BufferCreate_NeverAttachToFile |
-                                              BufferCreate_AlwaysNew);
-        buffer_set_setting(app, comp_buffer, BufferSetting_Unimportant, true);
-        buffer_set_setting(app, comp_buffer, BufferSetting_ReadOnly, true);
+        def_audio_init();
     }
-    
-    Buffer_Identifier left = buffer_identifier(string_u8_litexpr("*scratch*"));
-    Buffer_Identifier right = buffer_identifier(string_u8_litexpr("*scratch*"));
-    default_4coder_side_by_side_panels(app, left, right, file_names);
-    
-    b32 auto_load = def_get_config_b32(vars_save_string_lit("automatically_load_project"));
-    if (auto_load){
-        load_project(app);
-    }
-    
-    def_audio_init();
     
     {
         def_enable_virtual_whitespace = def_get_config_b32(vars_save_string_lit("enable_virtual_whitespace"));
@@ -391,7 +401,7 @@ CUSTOM_DOC("Default command for responding to a startup event")
     }
     
     J_ModalModeStartup(app);
-    J_OmnibufferStartup(app);
+    //J_OmnibufferStartup(app);
 }
 
 
@@ -425,6 +435,5 @@ CUSTOM_DOC("Default command for responding to a try-exit event")
 
 static void
 J_DefaultWholeScreenRenderCaller(Application_Links *app, Frame_Info frame_info) {
-    
     J_OmnibufferDraw(app, frame_info);
 }

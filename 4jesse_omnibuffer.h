@@ -5,9 +5,12 @@
 
 /*
 *  This file adds a constant buffer to the bottom of 4coder that is universally used for compilation errors, search and code peek
-*  - Everything should work with just this file EXCEPT RENDERING you need to call J_OmnibufferDraw(app, frame_info); in your
+*  You are also able to give the omibuffer any buffer but I haven't really found a good use case for it yet
+*  - you need to call J_OmnibufferDraw(app, frame_info); in your
  *        (default_whole_screen_render_caller) Hook.
-*
+*  - if you want to set omnibuffer to small when you hit return on a jump you must replace bindings for
+*   "if_read_only_goto_position" with "J_OmnibufferIfReadOnlyGoToPosition"
+
 *  - Disable OMNIBUFFER_DRAW_FULL_SCREEN_WIDTH if you would rather it draw to the normal width of your views
 *
 */
@@ -20,6 +23,7 @@ global u32 dummy_view_count = 0;
 
 #define OMNIBUFFER_SMALL_RATIO 0.05f
 #define OMNIBUFFER_LARGE_RATIO 0.9f
+#define OMNIBUFFER_CODE_PEEK_RATIO 0.15f
 #define OMNIBUFFER_MAX_BUFFER_COUNT 16
 #define OMNIBUFFER_BIN_HEIGHT 15
 
@@ -27,8 +31,8 @@ struct omnibuffer
 {
     View_ID last_view_id = 0;
     View_ID view_id = 0;
-    b32 is_open = 0;
-    b32 is_large = 0;
+    b32 is_active = 0;
+    b32 is_in_code_peek = 0;
 };
 global omnibuffer GLOBALOmnibuffer = {}; 
 
@@ -46,6 +50,7 @@ J_OmnibufferGetViewID() {
     View_ID result = GLOBALOmnibuffer.view_id;
     return result;
 }
+
 
 internal View_ID
 J_OmnibufferOpenView(Application_Links *app, View_ID active_view) {
@@ -88,25 +93,24 @@ J_OmnibufferOpenInternal(Application_Links* app) {
 }
 
 internal void
-J_OmnibufferSetDummyViewSize(Application_Links *app) {
+J_OmnibufferSetDummyViewSize(Application_Links *app, f32 ratio) {
     for(u32 view_index = 0;
         view_index < dummy_view_count;
         view_index++) {
         View_ID view = dummy_views[view_index];
-        view_set_split_proportion(app, view, GLOBALOmnibuffer.is_large ? OMNIBUFFER_LARGE_RATIO : OMNIBUFFER_SMALL_RATIO);
+        view_set_split_proportion(app, view, ratio);
     }
 }
 
 internal void
-J_OmnibufferSetSizeInternal(Application_Links* app) {
+J_OmnibufferSetSizeInternal(Application_Links* app, f32 ratio) {
     View_ID view = J_OmnibufferOpenInternal(app);
-    view_set_split_proportion(app, view, GLOBALOmnibuffer.is_large ? OMNIBUFFER_LARGE_RATIO : OMNIBUFFER_SMALL_RATIO);
+    view_set_split_proportion(app, view, ratio);
     
 #if OMNIBUFFER_DRAW_FULL_SCREEN_WIDTH
-    J_OmnibufferSetDummyViewSize(app);
+    J_OmnibufferSetDummyViewSize(app, ratio);
 #endif 
 }
-
 
 internal void
 J_OmnibufferCloseDummyViews(Application_Links *app) {
@@ -137,30 +141,21 @@ J_OmnibufferCloseInternal(Application_Links* app) {
 internal void
 J_OmnibufferSetActive(Application_Links* app) {
     View_ID view = J_OmnibufferOpenInternal(app);
+    GLOBALOmnibuffer.is_active = true;
     view_set_active(app, view);
 }
 
 internal void
 J_OmnibufferSetPassive(Application_Links* app) {
     View_ID view = J_OmnibufferOpenInternal(app);
+    GLOBALOmnibuffer.is_active = false;
     view_set_passive(app, view, true);
     view_set_active(app, GLOBALOmnibuffer.last_view_id);
 }
 
-
-internal void
-J_OmnibufferDisplayAndMaybeSwitch(Application_Links *app, b32 switch_to_omnibuffer) {
-    
-    View_ID last_view = get_active_view(app, Access_Always);
-    View_ID omnibuffer_view = J_OmnibufferOpenInternal(app);
-    
-    J_OmnibufferSetSizeInternal(app);
-    
-    if(switch_to_omnibuffer) {
-        view_set_active(app, omnibuffer_view);
-    } else {
-        view_set_active(app, last_view);
-    }
+function void
+J_OmnibufferSetSize(Application_Links* app, f32 ratio) {
+    J_OmnibufferSetSizeInternal(app, ratio);
 }
 
 internal void
@@ -172,62 +167,45 @@ J_OmnibufferAddBufferToView(Application_Links* app, Buffer_ID buffer_id, i64 cur
     }
 }
 
-
-CUSTOM_COMMAND_SIG(J_OmnibufferOpen) {
-    J_OmnibufferDisplayAndMaybeSwitch(app, false);
-}
-
-CUSTOM_COMMAND_SIG(J_OmnibufferOpenAndSwitch) {
-    J_OmnibufferDisplayAndMaybeSwitch(app, true);
-}
-
-CUSTOM_COMMAND_SIG(J_OmnibufferSetSmall) {
-    if(GLOBALOmnibuffer.is_large) {
-        GLOBALOmnibuffer.is_large = false;
-    }
-    J_OmnibufferOpen(app);
-}
-
-CUSTOM_COMMAND_SIG(J_OmnibufferSetLarge) {
-    if(!GLOBALOmnibuffer.is_large) {
-        GLOBALOmnibuffer.is_large = true;
-    }
-    J_OmnibufferOpen(app);
-}
-
-CUSTOM_COMMAND_SIG(J_OmnibufferToggleSize) {
-    GLOBALOmnibuffer.is_large = !GLOBALOmnibuffer.is_large;
-    J_OmnibufferOpen(app);
-}
-
-
-CUSTOM_COMMAND_SIG(J_OmnibufferClose) {
+CUSTOM_COMMAND_SIG(J_OmnibufferClose)
+CUSTOM_DOC("Closes Omnibuffer"){
     J_OmnibufferCloseInternal(app);
 }
 
-CUSTOM_COMMAND_SIG(J_OmnibufferSetLargeAndActive) {
-    GLOBALOmnibuffer.is_large = true;
-    J_OmnibufferOpenAndSwitch(app);
+CUSTOM_COMMAND_SIG(J_OmnibufferSetLargeAndActive)
+CUSTOM_DOC("Sets Omnibuffer To Active and Switches To It"){
+    J_OmnibufferSetSize(app, OMNIBUFFER_LARGE_RATIO);
+    J_OmnibufferSetActive(app);
 }
 
-CUSTOM_COMMAND_SIG(J_OmnibufferSetSmallAndInactive) {
-    GLOBALOmnibuffer.is_large = false;
-    J_OmnibufferOpen(app);
+CUSTOM_COMMAND_SIG(J_OmnibufferSetSmallAndInactive)
+CUSTOM_DOC("Sets Omnibuffer inactive and sets to small size"){
+    J_OmnibufferSetSize(app, OMNIBUFFER_SMALL_RATIO);
     J_OmnibufferSetPassive(app);
 }
 
+CUSTOM_COMMAND_SIG(J_OmnibufferToggleSizeAndActive)
+CUSTOM_DOC("Toggles Omnibuffer Size and activity"){
+    if(GLOBALOmnibuffer.is_active) {
+        J_OmnibufferSetSmallAndInactive(app);
+    } else {
+        J_OmnibufferSetLargeAndActive(app);
+    }
+}
 
-CUSTOM_COMMAND_SIG(J_OmnibufferOpenActiveViewInOmnibuffer) {
+CUSTOM_COMMAND_SIG(J_OmnibufferOpenActiveViewInOmnibuffer)
+CUSTOM_DOC("Saves Current View In Omnibuffer"){
     View_ID view = get_active_view(app, Access_Always);
     Buffer_ID buffer = view_get_buffer(app, view, Access_Always);
     i64 pos = view_get_cursor_pos(app, view);
     
-    J_OmnibufferOpen(app);
+    J_OmnibufferOpenInternal(app);
     J_OmnibufferAddBufferToView(app, buffer, pos);
 }
 
-CUSTOM_COMMAND_SIG(J_OmnibufferBuild) {
-    J_OmnibufferOpen(app);
+CUSTOM_COMMAND_SIG(J_OmnibufferBuild)
+CUSTOM_DOC("Build In Omnibuffer"){
+    J_OmnibufferSetLargeAndActive(app);
     View_ID view = J_OmnibufferGetViewID();
     Buffer_ID buffer = create_buffer(app, string_u8_litexpr("*compilation*"), BufferCreate_AlwaysNew);
     standard_search_and_build(app, view, buffer);
@@ -237,21 +215,23 @@ CUSTOM_COMMAND_SIG(J_OmnibufferBuild) {
 }
 
 
-CUSTOM_COMMAND_SIG(J_OmnibufferIfReadOnlyGoToPosition) {
+CUSTOM_COMMAND_SIG(J_OmnibufferIfReadOnlyGoToPosition)
+CUSTOM_DOC("replaces normal if_read_only_goto_position")
+{
     View_ID view = get_active_view(app, Access_ReadVisible);
     View_ID omnibuffer_view = J_OmnibufferGetViewID();
     
     if_read_only_goto_position(app);
     
     if(view == omnibuffer_view) {
-        J_OmnibufferSetSmall(app);
+        J_OmnibufferSetSmallAndInactive(app);
     }
 }
 
 internal void
 J_OmnibufferListAllLocationsGeneric(Application_Links *app, String_Const_u8_Array needle, List_All_Locations_Flag flags) {
     
-    J_OmnibufferSetLarge(app);
+    J_OmnibufferSetLargeAndActive(app);
     
     if (needle.count > 0){
         View_ID target_view = J_OmnibufferGetViewID();//get_next_view_after_active(app, Access_Always);
@@ -299,19 +279,43 @@ J_OmnibufferListAllLocationsGenericViewRange(Application_Links *app, List_All_Lo
     J_OmnibufferListAllLocationsGeneric(app, needle, flags);
 }
 
-CUSTOM_COMMAND_SIG(J_OmnibufferListAllLocations) {
+CUSTOM_COMMAND_SIG(J_OmnibufferListAllLocations)
+CUSTOM_DOC("Omnibuffer List All Locations"){
     J_OmnibufferListAllLocationsGenericQuery(app, ListAllLocationsFlag_CaseSensitive);
 }
 
-CUSTOM_COMMAND_SIG(J_OmnibufferListAllLocationsCaseInsensitive) {
+CUSTOM_COMMAND_SIG(J_OmnibufferListAllLocationsCaseInsensitive)
+CUSTOM_DOC("Omnibuffer List All Locations Case Insensitive"){
     J_OmnibufferListAllLocationsGenericQuery(app, 0);
 }
 
-CUSTOM_COMMAND_SIG(J_OmnibufferListAllLocationsOfIdentifier) {
+CUSTOM_COMMAND_SIG(J_OmnibufferListAllLocationsOfIdentifier)
+CUSTOM_DOC("Omnibuffer List All Locations of Token"){
     J_OmnibufferListAllLocationsGenericIdentifier(app, ListAllLocationsFlag_CaseSensitive);
 }
 
-CUSTOM_COMMAND_SIG(J_OmnibufferPeekDefinitionAtCursor) {
+CUSTOM_COMMAND_SIG(J_OmnibufferListAllSubstringLocationsCaseInsensitive)
+CUSTOM_DOC("Omnibuffer List All substrings search case insensitive"){
+    J_OmnibufferListAllLocationsGenericQuery(app, ListAllLocationsFlag_MatchSubstring);
+}
+
+
+function void
+J_OmnibufferSetViewTop(Application_Links* app) {
+    View_ID view = get_active_view(app, Access_ReadVisible);
+    Rect_f32 region = view_get_buffer_region(app, view);
+    i64 pos = view_get_cursor_pos(app, view);
+    Buffer_Cursor cursor = view_compute_cursor(app, view, seek_pos(pos));
+    f32 view_height = rect_height(region);
+    Buffer_Scroll scroll = view_get_buffer_scroll(app, view);
+    scroll.target.line_number = cursor.line;
+    scroll.target.pixel_shift.y = 0;
+    view_set_buffer_scroll(app, view, scroll, SetBufferScroll_SnapCursorIntoView);
+    no_mark_snap_to_cursor(app, view);
+}
+
+CUSTOM_COMMAND_SIG(J_OmnibufferPeekDefinitionAtCursor)
+CUSTOM_DOC("Sets Omnibuffer to file/line of definition of token under cursor"){
     
     View_ID view = get_active_view(app, Access_Visible);
     if (view != 0){
@@ -328,10 +332,15 @@ CUSTOM_COMMAND_SIG(J_OmnibufferPeekDefinitionAtCursor) {
                     Code_Index_Note *note = file->note_array.ptrs[i];
                     if (string_match(note->text, query)){
                         
-                        J_OmnibufferSetLargeAndActive(app);
+                        J_OmnibufferOpenInternal(app);
+                        J_OmnibufferSetSize(app, OMNIBUFFER_CODE_PEEK_RATIO);
+                        GLOBALOmnibuffer.is_in_code_peek = true;
+                        
                         View_ID omnibuffer_view = J_OmnibufferGetViewID();
                         point_stack_push_view_cursor(app, omnibuffer_view);
-                        jump_to_location(app, omnibuffer_view, buffer, note->pos.first);
+                        view_set_active(app, omnibuffer_view);
+                        set_view_to_location(app, omnibuffer_view, buffer, seek_pos(note->pos.first));
+                        J_OmnibufferSetViewTop(app);
                         view_set_active(app, view);
                         
                         goto done;
@@ -341,6 +350,23 @@ CUSTOM_COMMAND_SIG(J_OmnibufferPeekDefinitionAtCursor) {
         }
         done:;
         code_index_unlock();
+    }
+    
+}
+
+CUSTOM_COMMAND_SIG(J_OmnibufferCloseCodePeek)
+CUSTOM_DOC("Sets Omnibuffer Size To Small") {
+    J_OmnibufferSetSmallAndInactive(app);
+    GLOBALOmnibuffer.is_in_code_peek = false;
+}
+
+CUSTOM_COMMAND_SIG(J_OmnibufferToggleCodePeek)
+CUSTOM_DOC("Sets Omnibuffer To code peek or small and passive")
+{
+    if(GLOBALOmnibuffer.is_in_code_peek) {
+        J_OmnibufferCloseCodePeek(app);
+    } else {
+        J_OmnibufferPeekDefinitionAtCursor(app);
     }
 }
 
@@ -386,7 +412,7 @@ J_OmnibufferDraw(Application_Links* app, Frame_Info frame_info) {
     //f32 digit_advance = face_metrics.decimal_digit_advance;
     
     // NOTE(allen): file bar
-    b64 showing_file_bar = false;
+    b64 showing_file_bar = true;
     if (view_get_setting(app, view_id, ViewSetting_ShowFileBar, &showing_file_bar) && showing_file_bar){
         Rect_f32_Pair pair = layout_file_bar_on_top(region, line_height);
         draw_file_bar(app, view_id, buffer, face_id, pair.min);
